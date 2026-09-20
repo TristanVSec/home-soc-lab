@@ -1,0 +1,132 @@
+// Sanitized. File paths that revealed host layout are shown as placeholders.
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------------------
+// Container logs — discovered through the socket proxy, never the socket
+// ---------------------------------------------------------------------------
+
+discovery.docker "containers" {
+  host             = "tcp://dockerproxy:2375"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  // Docker reports names with a leading slash: "/security-loki" -> "security-loki"
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = "tcp://dockerproxy:2375"
+  targets          = discovery.relabel.containers.output
+  relabel_rules    = discovery.relabel.containers.rules
+  forward_to       = [loki.write.local.receiver]
+  refresh_interval = "5s"
+}
+
+// ---------------------------------------------------------------------------
+// Host syslog
+// ---------------------------------------------------------------------------
+
+local.file_match "varlogs" {
+  path_targets = [
+    {__address__ = "localhost", __path__ = "/var/log/{syslog,auth.log}", job = "varlogs", host = "labnode"},
+  ]
+}
+
+loki.source.file "varlogs" {
+  targets    = local.file_match.varlogs.targets
+  forward_to = [loki.write.local.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Suricata eve.json
+// ---------------------------------------------------------------------------
+
+local.file_match "suricata_eve" {
+  path_targets = [
+    {__address__ = "localhost", __path__ = "/var/log/suricata/eve.json", job = "suricata", host = "labnode"},
+  ]
+}
+
+loki.source.file "suricata_eve" {
+  targets    = local.file_match.suricata_eve.targets
+  forward_to = [loki.process.suricata_eve.receiver]
+}
+
+loki.process "suricata_eve" {
+  forward_to = [loki.write.local.receiver]
+
+  // --- Drop first, parse second. -------------------------------------------
+  // eve.json carries flow/dns/tls/http records as well as alerts, and they
+  // vastly outnumber the alerts. Deciding what to keep at the collector costs
+  // one cheap JSON extraction and saves parsing, shipping, and storing
+  // everything else. See docs/04 for the tradeoff this makes.
+  stage.json {
+    expressions = { event_type = "event_type" }
+  }
+  stage.labels {
+    values = { event_type = "event_type" }
+  }
+  stage.match {
+    selector = "{event_type!=\"alert\"}"
+    action   = "drop"
+  }
+
+  // --- Full extraction, alerts only ----------------------------------------
+  stage.json {
+    expressions = {
+      signature    = "alert.signature",
+      signature_id = "alert.signature_id",
+      severity     = "alert.severity",
+      category     = "alert.category",
+      action_taken = "alert.action",
+      src_ip       = "src_ip",
+      dest_ip      = "dest_ip",
+      dest_port    = "dest_port",
+      proto        = "proto",
+      ts           = "timestamp",
+    }
+  }
+
+  // Only bounded fields become labels. src_ip / dest_ip / dest_port are
+  // deliberately NOT promoted — they are unbounded and would shatter the
+  // index into one stream per host pair. They stay in the log body and are
+  // filtered at query time with | json.
+  stage.labels {
+    values = {
+      signature_id = "signature_id",
+      severity     = "severity",
+      category     = "category",
+      action_taken = "action_taken",
+    }
+  }
+
+  // Use Suricata's event timestamp, not Alloy's read time. Without this, a
+  // backlog after a restart lands every replayed event at "now" and the
+  // timeline is a lie.
+  stage.timestamp {
+    source = "ts"
+    format = "RFC3339Nano"
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -1,0 +1,43 @@
+# --- Secrets ---
+.env
+*.env
+!*.env.example
+secrets/
+*.key
+*.pem
+*_rsa
+*_ed25519
+
+# --- Runtime data from the stack (large, churning, and identity-bearing) ---
+# Loki's index metadata embeds the instance hostname.
+loki/chunks/
+loki/index/
+loki/tsdb-*/
+loki/wal/
+loki/compactor/
+loki/boltdb-shipper-*/
+
+# Grafana's SQLite DB holds users, sessions, and datasource credentials.
+grafana/grafana.db
+grafana/data/
+grafana/plugins/
+grafana/png/
+grafana/csv/
+
+# --- Raw capture and alert output: contains real internal addresses,
+#     browsing destinations, and device fingerprints. Never publish. ---
+*.pcap
+*.pcapng
+eve.json
+fast.log
+stats.log
+suricata.log
+logs/
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/

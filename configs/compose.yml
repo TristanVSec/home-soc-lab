@@ -1,0 +1,103 @@
+# Sanitized. Host port bindings are placeholders — see configs/README.md.
+#
+# All published ports bind to the mesh-VPN interface address, never 0.0.0.0.
+# A service that is not published at all (alloy) is reachable only from inside
+# the compose network, which is the correct default for anything without a UI
+# you need.
+
+services:
+  # Filtering proxy in front of the Docker API. Alloy talks to this over TCP
+  # instead of holding the socket itself — see docs/07 on why ":ro" on a
+  # socket mount is not a boundary.
+  dockerproxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: security-dockerproxy
+    environment:
+      - CONTAINERS=1        # GET /containers/* — list and read logs
+      - NETWORKS=1          # GET /networks — discovery needs it for labels
+      - POST=0              # every write verb refused
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    mem_limit: 64m
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.7
+    container_name: security-loki
+    mem_limit: 2g
+    command: -config.file=/etc/loki/config.yml
+    ports:
+      # Alloy reaches Loki over the compose network, so this publish exists
+      # only for host-side debugging. Loopback-bound, not tailnet-bound.
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki:/loki
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: security-grafana
+    mem_limit: 1g
+    ports:
+      - "192.0.2.10:3000:3000"     # LAN
+      - "100.x.y.z:3000:3000"      # and mesh-VPN
+    volumes:
+      - ./grafana:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD}   # from .env, not committed
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.10.2
+    container_name: security-alloy
+    mem_limit: 512m
+    command: run /etc/alloy/config.alloy
+    # No ports published. Alloy's debug UI (:12345) stays inside the network.
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log/suricata:/var/log/suricata:ro
+    group_add:
+      # Suricata's group, so Alloy can read eve.json without running as root.
+      - "1002"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  ntfy:
+    image: binwiederhier/ntfy:v2.28.0
+    container_name: security-ntfy
+    mem_limit: 256m
+    command: serve
+    ports:
+      - "100.x.y.z:80:80"          # mesh-VPN interface only
+    volumes:
+      - ./ntfy/cache:/var/cache/ntfy
+      - ./ntfy/etc:/etc/ntfy
+    environment:
+      - TZ=${TZ}                   # from .env — a hardcoded TZ leaks your region
+      - NTFY_CACHE_FILE=/var/cache/ntfy/cache.db
+      - NTFY_AUTH_FILE=/etc/ntfy/auth.db
+      - NTFY_AUTH_DEFAULT_ACCESS=deny-all
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
